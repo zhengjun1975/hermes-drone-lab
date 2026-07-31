@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Drone 3D Tracker</title>
+<style>
+  body { margin: 0; overflow: hidden; font-family: monospace; background: #111; }
+  #info { position: absolute; top: 10px; left: 10px; color: #0f0; font-size: 14px; background: rgba(0,0,0,0.7); padding: 10px; border-radius: 5px; z-index: 10; }
+</style>
+</head>
+<body>
+<div id="info">Connecting...</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const info = document.getElementById('info');
+const colors = [0xff4444, 0x44ff44, 0x4488ff, 0xffaa00];
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111122);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.5, 20000);
+camera.position.set(20, 20, 20);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0);
+controls.update();
+
+// Large grid centered at origin
+const grid = new THREE.GridHelper(200, 40, 0x555577, 0x222244);
+scene.add(grid);
+
+// Origin reference
+const originDot = new THREE.Mesh(
+  new THREE.SphereGeometry(1, 16, 16),
+  new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true })
+);
+originDot.position.set(0, 0, 0);
+scene.add(originDot);
+
+// Axis arrows
+scene.add(new THREE.ArrowHelper(new THREE.Vector3(1,0,0), [0,0,0], 5, 0xff0000));
+scene.add(new THREE.ArrowHelper(new THREE.Vector3(0,0,1), [0,0,0], 5, 0x0000ff));
+
+// Drone storage
+const drones = {};
+const droneData = {};
+let originSet = false;
+let origin = { x: 0, y: 0, z: 0 };
+const trailMax = 1000;
+
+function createDrone(id, color) {
+  const mat = new THREE.MeshBasicMaterial({ color });
+  const marker = new THREE.Mesh(new THREE.SphereGeometry(0.5, 16, 16), mat);
+  marker.visible = false;
+  scene.add(marker);
+
+  const arrow = new THREE.ArrowHelper([1,0,0], [0,0,0], 1.5, color);
+  arrow.visible = false;
+  scene.add(arrow);
+
+  // Trail line
+  const geom = new THREE.BufferGeometry();
+  const arr = new Float32Array(trailMax * 3);
+  geom.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+  geom.setDrawRange(0, 0);
+  const trail = new THREE.Line(geom, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.6 }));
+  scene.add(trail);
+
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: (() => { const c=document.createElement('canvas'); c.width=128; c.height=32;
+      const ctx=c.getContext('2d'); ctx.fillStyle='#'+color.toString(16).padStart(6,'0');
+      ctx.font='bold 24px monospace'; ctx.fillText('D'+id,0,24); return new THREE.CanvasTexture(c); })(),
+  }));
+  sprite.scale.set(2, 0.5, 1); sprite.position.y = 1; marker.add(sprite);
+
+  return { marker, arrow, trail, arr, count: 0 };
+}
+
+for (let i = 1; i <= 4; i++) drones[i] = createDrone(i, colors[i-1]);
+
+// WebSocket
+const ws = new WebSocket('ws://192.168.112.251:9090');
+ws.onopen = () => info.innerHTML = '✅ Live — waiting for drone data...';
+ws.onclose = () => info.innerHTML = '❌ Disconnected';
+ws.onerror = () => info.innerHTML = '❌ Cannot connect';
+
+ws.onmessage = (e) => {
+  try {
+    const data = JSON.parse(e.data);
+    if (!data.drones) return;
+    let activeCount = 0;
+
+    for (const [id, pos] of Object.entries(data.drones)) {
+      const did = parseInt(id);
+      if (typeof pos.x !== 'number') continue;
+      activeCount++;
+
+      // Set origin from first received position
+      if (!originSet && did === 1) {
+        origin = { x: pos.x, y: pos.y, z: pos.z };
+        originSet = true;
+      }
+
+      // Relative position
+      const rx = pos.x - origin.x;
+      const ry = pos.y - origin.y;
+      const rz = -(pos.z - origin.z); // NED z-up → ENU
+
+      const d = drones[did];
+      d.marker.position.set(rx, ry, rz);
+      d.marker.visible = true;
+      d.arrow.position.copy(d.marker.position);
+      d.arrow.visible = true;
+
+      // Trail
+      const idx = (d.count % trailMax) * 3;
+      d.arr[idx] = rx;
+      d.arr[idx + 1] = ry;
+      d.arr[idx + 2] = rz;
+      d.count++;
+      d.trail.geometry.setDrawRange(0, Math.min(d.count, trailMax));
+      d.trail.geometry.attributes.position.needsUpdate = true;
+    }
+
+    info.innerHTML = `✅ ${activeCount} drones live | Drone 1: (${(droneData[1]?.x||0).toFixed(1)}, ${(droneData[1]?.y||0).toFixed(1)})`;
+  } catch (err) {}
+};
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
